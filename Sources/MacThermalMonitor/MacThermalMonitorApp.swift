@@ -67,7 +67,7 @@ struct HistoryChart: View {
                     let y = geo.size.height * (1 - CGFloat(value / maxValue))
                     index == 0 ? path.move(to: CGPoint(x: x, y: y)) : path.addLine(to: CGPoint(x: x, y: y))
                 }
-            }.stroke(.accent, lineWidth: 2)
+            }.stroke(Color.accentColor, lineWidth: 2)
         }.overlay(alignment: .topLeading) { Text("内存使用率").font(.caption2).foregroundStyle(.secondary) }
     }
 }
