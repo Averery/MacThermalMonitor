@@ -6,7 +6,8 @@ let package = Package(
     platforms: [.macOS(.v15)],
     products: [.executable(name: "MacThermalMonitor", targets: ["MacThermalMonitor"])],
     targets: [
-        .executableTarget(name: "MacThermalMonitor", path: "Sources/MacThermalMonitor"),
-        .testTarget(name: "MacThermalMonitorTests", dependencies: ["MacThermalMonitor"], path: "Tests/MacThermalMonitorTests")
+        .target(name: "MacThermalMonitorCore", path: "Sources/MacThermalMonitorCore"),
+        .executableTarget(name: "MacThermalMonitor", dependencies: ["MacThermalMonitorCore"], path: "Sources/MacThermalMonitor"),
+        .testTarget(name: "MacThermalMonitorTests", dependencies: ["MacThermalMonitorCore"], path: "Tests/MacThermalMonitorTests")
     ]
 )

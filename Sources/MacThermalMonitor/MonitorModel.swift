@@ -1,6 +1,7 @@
 import Foundation
 import Darwin
 import AppKit
+import MacThermalMonitorCore
 
 struct MetricValue: Identifiable, Sendable { let id: String; let name: String; let displayValue: String; let source: String }
 struct HistorySample: Sendable { let date: Date; let memoryPercent: Double }
@@ -47,4 +48,3 @@ actor SystemMetricsCollector {
     private func cpuUsage() -> Double { var load = host_cpu_load_info(); var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.stride / MemoryLayout<integer_t>.stride); let result = withUnsafeMutablePointer(to: &load) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count) }; }; guard result == KERN_SUCCESS else { return 0 }; let total = Double(load.cpu_ticks.0 + load.cpu_ticks.1 + load.cpu_ticks.2 + load.cpu_ticks.3); return total > 0 ? Double(load.cpu_ticks.0 + load.cpu_ticks.1 + load.cpu_ticks.2) / total * 100 : 0 }
 }
 
-enum FanCapability { case fanless, unknown; var isFanless: Bool { self == .fanless }; var summary: String { isFanless ? "此设备采用无风扇设计" : "风扇能力未验证" }; static func detect() -> FanCapability { let name = Host.current().localizedName?.lowercased() ?? ""; return name.contains("macbook air") ? .fanless : .unknown } }

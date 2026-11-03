@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import MacThermalMonitorCore
 
 @main
 struct MacThermalMonitorApp: App {
