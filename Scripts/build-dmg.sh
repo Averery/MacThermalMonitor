@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.1.0}"
 ARCH="${ARCH:-$(uname -m)}"
 OUT="$ROOT/dist"
 APP="$OUT/MacThermalMonitor.app"
@@ -16,7 +16,7 @@ if [[ -z "$BIN" ]]; then
 fi
 cp "$BIN" "$APP/Contents/MacOS/MacThermalMonitor"
 cat > "$APP/Contents/Info.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleDisplayName</key><string>Mac Thermal Monitor</string><key>CFBundleExecutable</key><string>MacThermalMonitor</string><key>CFBundleIdentifier</key><string>com.example.MacThermalMonitor</string><key>CFBundleName</key><string>Mac Thermal Monitor</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>$VERSION</string><key>CFBundleVersion</key><string>$VERSION</string><key>LSMinimumSystemVersion</key><string>15.0</string><key>LSUIElement</key><true/></dict></plist>
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleDisplayName</key><string>Mac Thermal Monitor</string><key>CFBundleExecutable</key><string>MacThermalMonitor</string><key>CFBundleIdentifier</key><string>com.averery.MacThermalMonitor</string><key>CFBundleName</key><string>Mac Thermal Monitor</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>$VERSION</string><key>CFBundleVersion</key><string>$VERSION</string><key>LSMinimumSystemVersion</key><string>15.0</string><key>LSUIElement</key><true/></dict></plist>
 PLIST
 if [[ -z "${SIGNING_IDENTITY:-}" ]]; then
   # Ad-hoc signing does not provide Apple trust or notarization, but keeps the

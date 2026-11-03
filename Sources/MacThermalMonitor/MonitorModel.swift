@@ -1,54 +1,183 @@
-import Foundation
-import Darwin
 import AppKit
+import Darwin
+import Foundation
+import ServiceManagement
+import SwiftUI
 import MacThermalMonitorCore
 
-struct MetricValue: Identifiable, Sendable { let id: String; let name: String; let displayValue: String; let source: String }
-struct HistorySample: Sendable { let date: Date; let memoryPercent: Double }
+enum MetricKind: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
+    case cpuUsage, memoryUsage, thermalState, uptime, cpuTemperature, gpuTemperature, fanSpeed
+    var id: String { rawValue }
+    func title(chinese: Bool) -> String {
+        switch self {
+        case .cpuUsage: chinese ? "CPU 使用率" : "CPU usage"
+        case .memoryUsage: chinese ? "内存占用" : "Memory usage"
+        case .thermalState: chinese ? "系统热状态" : "Thermal state"
+        case .uptime: chinese ? "系统运行时间" : "System uptime"
+        case .cpuTemperature: chinese ? "CPU 温度" : "CPU temperature"
+        case .gpuTemperature: chinese ? "GPU 温度" : "GPU temperature"
+        case .fanSpeed: chinese ? "风扇转速" : "Fan speed"
+        }
+    }
+}
 
-@MainActor final class MonitorModel: ObservableObject {
-    @Published private(set) var visibleMetrics: [MetricValue] = []
+enum MainSection: String, CaseIterable, Identifiable { case overview, display, data, capabilities, about; var id: String { rawValue } }
+enum AppTheme: String, CaseIterable, Identifiable { case system, light, dark; var id: String { rawValue }; var colorScheme: ColorScheme? { switch self { case .system: nil; case .light: .light; case .dark: .dark } } }
+enum AppLanguage: String, CaseIterable, Identifiable { case automatic, chinese, english; var id: String { rawValue } }
+
+struct MetricValue: Identifiable, Sendable {
+    let kind: MetricKind; let value: String; let source: String; let isSupported: Bool
+    var id: String { kind.id }
+}
+struct HistorySample: Identifiable, Sendable {
+    let date: Date; let cpuPercent: Double; let memoryPercent: Double
+    var id: Date { date }
+}
+struct MetricsSnapshot: Sendable { let metrics: [MetricValue]; let cpuPercent: Double; let memoryPercent: Double }
+
+@MainActor
+final class MonitorModel: ObservableObject {
+    @Published private(set) var metrics: [MetricValue] = []
     @Published private(set) var history: [HistorySample] = []
-    @Published var refreshInterval: Double = 3
-    @Published var alwaysOnTop = false
-    @Published var joinAllSpaces = false
-    @Published var appearance = "system"
-    private var task: Task<Void, Never>?
+    @Published var selectedSection: MainSection = .overview
+    @Published var refreshInterval: Double { didSet { save(refreshInterval, Key.refreshInterval) } }
+    @Published var alwaysOnTop: Bool { didSet { save(alwaysOnTop, Key.alwaysOnTop); floatingWindow.apply(self) } }
+    @Published var joinAllSpaces: Bool { didSet { save(joinAllSpaces, Key.joinAllSpaces); floatingWindow.apply(self) } }
+    @Published var floatingOpacity: Double { didSet { save(floatingOpacity, Key.floatingOpacity); floatingWindow.apply(self) } }
+    @Published var compactFloatingWindow: Bool { didSet { save(compactFloatingWindow, Key.compactFloatingWindow); floatingWindow.apply(self) } }
+    @Published var theme: AppTheme { didSet { save(theme.rawValue, Key.theme) } }
+    @Published var language: AppLanguage { didSet { save(language.rawValue, Key.language) } }
+    @Published var menuBarMetric: MetricKind { didSet { save(menuBarMetric.rawValue, Key.menuBarMetric) } }
+    @Published var launchAtLogin: Bool { didSet { updateLaunchAtLogin() } }
+    @Published private(set) var launchAtLoginMessage = ""
+    @Published private(set) var lastUpdated: Date?
+    @Published var visibleMetricKinds: Set<MetricKind> { didSet { save(visibleMetricKinds.map(\.rawValue), Key.visibleMetricKinds) } }
+
+    let floatingWindow = FloatingWindowController()
     private let collector = SystemMetricsCollector()
+    private var monitorTask: Task<Void, Never>?
+    private let defaults = UserDefaults.standard
 
-    var menuBarTitle: String { visibleMetrics.first?.displayValue ?? "监测中" }
-    var hardwareSummary: String { collector.hardwareSummary }
+    init() {
+        refreshInterval = defaults.double(forKey: Key.refreshInterval).nonZero(or: 3)
+        alwaysOnTop = defaults.object(forKey: Key.alwaysOnTop) as? Bool ?? true
+        joinAllSpaces = defaults.object(forKey: Key.joinAllSpaces) as? Bool ?? false
+        floatingOpacity = defaults.object(forKey: Key.floatingOpacity) as? Double ?? 0.96
+        compactFloatingWindow = defaults.object(forKey: Key.compactFloatingWindow) as? Bool ?? false
+        theme = AppTheme(rawValue: defaults.string(forKey: Key.theme) ?? "system") ?? .system
+        language = AppLanguage(rawValue: defaults.string(forKey: Key.language) ?? "automatic") ?? .automatic
+        menuBarMetric = MetricKind(rawValue: defaults.string(forKey: Key.menuBarMetric) ?? "cpuUsage") ?? .cpuUsage
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+        let stored = defaults.stringArray(forKey: Key.visibleMetricKinds) ?? [MetricKind.cpuUsage.rawValue, MetricKind.memoryUsage.rawValue, MetricKind.thermalState.rawValue, MetricKind.uptime.rawValue]
+        visibleMetricKinds = Set(stored.compactMap(MetricKind.init(rawValue:)))
+    }
 
-    func start() async { guard task == nil else { return }; await refresh(); task = Task { while !Task.isCancelled { try? await Task.sleep(for: .seconds(refreshInterval)); await refresh() } } }
+    var isChinese: Bool {
+        switch language {
+        case .chinese: true
+        case .english: false
+        case .automatic: Locale.preferredLanguages.first?.lowercased().hasPrefix("zh") == true
+        }
+    }
+    func text(_ zh: String, _ en: String) -> String { isChinese ? zh : en }
+    var hardwareSummary: String { FanCapability.detect().summary }
+    var menuBarTitle: String { metric(for: menuBarMetric)?.value ?? text("读取中", "Loading") }
+    var visibleMetrics: [MetricValue] { metrics.filter { visibleMetricKinds.contains($0.kind) } }
+    var floatingMetrics: [MetricValue] {
+        visibleMetrics.filter { [.cpuUsage, .memoryUsage, .thermalState, .uptime].contains($0.kind) }.prefix(4).map { $0 }
+    }
+
+    func start() {
+        guard monitorTask == nil else { return }
+        monitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.refresh()
+                try? await Task.sleep(for: .seconds(self.refreshInterval))
+            }
+        }
+    }
+    func refreshNow() async { await refresh() }
+    func setMetric(_ kind: MetricKind, visible: Bool) {
+        if visible { visibleMetricKinds.insert(kind) }
+        else if visibleMetricKinds.count > 1 { visibleMetricKinds.remove(kind) }
+    }
+    func showFloatingWindow() { floatingWindow.show(model: self); floatingWindow.apply(self) }
+    func hideFloatingWindow() { floatingWindow.hide() }
+    func configure(section: MainSection) { selectedSection = section }
+
     private func refresh() async {
-        let snapshot = await Task.detached(priority: .utility) { SystemMetricsCollector().collect() }.value
-        visibleMetrics = snapshot.metrics
-        history.append(HistorySample(date: .now, memoryPercent: snapshot.memoryPercent))
-        history = Array(history.suffix(200))
+        let snapshot = await collector.collect(chinese: isChinese)
+        guard !Task.isCancelled else { return }
+        metrics = snapshot.metrics
+        lastUpdated = .now
+        history.append(HistorySample(date: .now, cpuPercent: snapshot.cpuPercent, memoryPercent: snapshot.memoryPercent))
+        history.removeAll { $0.date < Date.now.addingTimeInterval(-600) }
+    }
+    private func metric(for kind: MetricKind) -> MetricValue? { metrics.first { $0.kind == kind } }
+    private func updateLaunchAtLogin() {
+        do {
+            if launchAtLogin { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            launchAtLoginMessage = text("已更新登录项设置", "Login item updated")
+        } catch {
+            launchAtLogin = SMAppService.mainApp.status == .enabled
+            launchAtLoginMessage = text("无法更新登录项：\(error.localizedDescription)", "Could not update login item: \(error.localizedDescription)")
+        }
+    }
+    private func save<T>(_ value: T, _ key: String) { defaults.set(value, forKey: key) }
+    private enum Key {
+        static let refreshInterval = "refreshInterval", alwaysOnTop = "alwaysOnTop", joinAllSpaces = "joinAllSpaces", floatingOpacity = "floatingOpacity", compactFloatingWindow = "compactFloatingWindow", theme = "theme", language = "language", menuBarMetric = "menuBarMetric", visibleMetricKinds = "visibleMetricKinds"
     }
 }
 
-struct MetricsSnapshot: Sendable { let metrics: [MetricValue]; let memoryPercent: Double }
+private extension Double { func nonZero(or fallback: Double) -> Double { self == 0 ? fallback : self } }
 
-final class SystemMetricsCollector: Sendable {
-    let hardwareSummary: String
-    init() { hardwareSummary = FanCapability.detect().summary }
-    func collect() -> MetricsSnapshot {
-        let cpu = cpuUsage()
-        let memory = memoryUsage()
-        let thermal = ProcessInfo.processInfo.thermalState
+actor SystemMetricsCollector {
+    private var previousTicks: (user: UInt32, system: UInt32, idle: UInt32, nice: UInt32)?
+    func collect(chinese: Bool) -> MetricsSnapshot {
+        let cpu = cpuUsage(), memory = memoryUsage()
+        let unsupported = chinese ? "不支持" : "Unsupported"
+        let noFan = chinese ? "此设备采用无风扇设计" : "Fanless design"
+        let publicAPI = chinese ? "macOS 公共 API" : "macOS public API"
         let metrics = [
-            MetricValue(id: "cpu", name: "CPU 使用率", displayValue: String(format: "%.1f%%", cpu), source: "host_processor_info / macOS 公共 API"),
-            MetricValue(id: "memory", name: "内存占用", displayValue: String(format: "%.1f%%", memory), source: "host_statistics64 / macOS 公共 API"),
-            MetricValue(id: "thermal", name: "系统热状态", displayValue: thermalLabel(thermal), source: "ProcessInfo.thermalState（不是摄氏温度）"),
-            MetricValue(id: "cpuTemp", name: "CPU 温度", displayValue: "不支持", source: "未使用未公开/未验证传感器接口"),
-            MetricValue(id: "gpuTemp", name: "GPU 温度", displayValue: "不支持", source: "未使用未公开/未验证传感器接口"),
-            MetricValue(id: "fan", name: "风扇转速", displayValue: FanCapability.detect().isFanless ? "无风扇设计" : "不支持", source: "硬件能力检测；未接入控制驱动")
+            MetricValue(kind: .cpuUsage, value: String(format: "%.1f%%", cpu), source: "host_statistics / \(publicAPI)", isSupported: true),
+            MetricValue(kind: .memoryUsage, value: String(format: "%.1f%%", memory), source: "host_statistics64 / \(publicAPI)", isSupported: true),
+            MetricValue(kind: .thermalState, value: thermalText(ProcessInfo.processInfo.thermalState, chinese: chinese), source: "ProcessInfo.thermalState", isSupported: true),
+            MetricValue(kind: .uptime, value: uptimeText(chinese: chinese), source: "ProcessInfo.systemUptime", isSupported: true),
+            MetricValue(kind: .cpuTemperature, value: unsupported, source: chinese ? "无可靠的公开通用传感器接口" : "No reliable public sensor API", isSupported: false),
+            MetricValue(kind: .gpuTemperature, value: unsupported, source: chinese ? "无可靠的公开通用传感器接口" : "No reliable public sensor API", isSupported: false),
+            MetricValue(kind: .fanSpeed, value: FanCapability.detect().isFanless ? noFan : unsupported, source: chinese ? "未接入未验证的风扇驱动" : "No unverified fan driver is used", isSupported: false)
         ]
-        return MetricsSnapshot(metrics: metrics, memoryPercent: memory)
+        return MetricsSnapshot(metrics: metrics, cpuPercent: cpu, memoryPercent: memory)
     }
-    private func thermalLabel(_ state: ProcessInfo.ThermalState) -> String { switch state { case .nominal: "正常"; case .fair: "较高"; case .serious: "严重"; case .critical: "临界"; @unknown default: "未知" } }
-    private func memoryUsage() -> Double { var info = vm_statistics64(); var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride); let result = withUnsafeMutablePointer(to: &info) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count) } }; guard result == KERN_SUCCESS else { return 0 }; var pageSize: vm_size_t = 0; guard host_page_size(mach_host_self(), &pageSize) == KERN_SUCCESS, pageSize > 0 else { return 0 }; let used = Double(info.active_count + info.wire_count + info.compressor_page_count); let total = Double(ProcessInfo.processInfo.physicalMemory) / Double(pageSize); return total > 0 ? used / total * 100 : 0 }
-    private func cpuUsage() -> Double { var load = host_cpu_load_info(); var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.stride / MemoryLayout<integer_t>.stride); let result = withUnsafeMutablePointer(to: &load) { $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count) }; }; guard result == KERN_SUCCESS else { return 0 }; let total = Double(load.cpu_ticks.0 + load.cpu_ticks.1 + load.cpu_ticks.2 + load.cpu_ticks.3); return total > 0 ? Double(load.cpu_ticks.0 + load.cpu_ticks.1 + load.cpu_ticks.2) / total * 100 : 0 }
+    private func cpuUsage() -> Double {
+        var load = host_cpu_load_info()
+        var count = mach_msg_type_number_t(MemoryLayout<host_cpu_load_info_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &load) { pointer in pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, $0, &count) } }
+        guard result == KERN_SUCCESS else { return 0 }
+        let ticks = (load.cpu_ticks.0, load.cpu_ticks.1, load.cpu_ticks.2, load.cpu_ticks.3)
+        defer { previousTicks = (ticks.0, ticks.1, ticks.2, ticks.3) }
+        guard let previousTicks else { return 0 }
+        let user = ticks.0 &- previousTicks.user, system = ticks.1 &- previousTicks.system, idle = ticks.2 &- previousTicks.idle, nice = ticks.3 &- previousTicks.nice
+        let total = Double(user &+ system &+ idle &+ nice)
+        return total > 0 ? Double(user &+ system &+ nice) / total * 100 : 0
+    }
+    private func memoryUsage() -> Double {
+        var info = vm_statistics64()
+        var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.stride / MemoryLayout<integer_t>.stride)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { host_statistics64(mach_host_self(), HOST_VM_INFO64, $0, &count) } }
+        guard result == KERN_SUCCESS else { return 0 }
+        var pageSize: vm_size_t = 0
+        guard host_page_size(mach_host_self(), &pageSize) == KERN_SUCCESS, pageSize > 0 else { return 0 }
+        let usedPages = Double(info.active_count + info.wire_count + info.compressor_page_count)
+        let totalPages = Double(ProcessInfo.processInfo.physicalMemory) / Double(pageSize)
+        return totalPages > 0 ? usedPages / totalPages * 100 : 0
+    }
+    private func thermalText(_ state: ProcessInfo.ThermalState, chinese: Bool) -> String {
+        switch state { case .nominal: chinese ? "正常" : "Nominal"; case .fair: chinese ? "较高" : "Fair"; case .serious: chinese ? "严重" : "Serious"; case .critical: chinese ? "临界" : "Critical"; @unknown default: chinese ? "未知" : "Unknown" }
+    }
+    private func uptimeText(chinese: Bool) -> String {
+        let seconds = Int(ProcessInfo.processInfo.systemUptime), hours = seconds / 3600, minutes = (seconds % 3600) / 60
+        return chinese ? "\(hours) 小时 \(minutes) 分" : "\(hours)h \(minutes)m"
+    }
 }
-
