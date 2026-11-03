@@ -2,8 +2,8 @@ import Foundation
 import Darwin
 import AppKit
 
-struct MetricValue: Identifiable { let id: String; let name: String; let displayValue: String; let source: String }
-struct HistorySample { let date: Date; let memoryPercent: Double }
+struct MetricValue: Identifiable, Sendable { let id: String; let name: String; let displayValue: String; let source: String }
+struct HistorySample: Sendable { let date: Date; let memoryPercent: Double }
 
 @MainActor final class MonitorModel: ObservableObject {
     @Published private(set) var visibleMetrics: [MetricValue] = []
@@ -23,7 +23,7 @@ struct HistorySample { let date: Date; let memoryPercent: Double }
     deinit { task?.cancel() }
 }
 
-struct MetricsSnapshot { let metrics: [MetricValue]; let memoryPercent: Double }
+struct MetricsSnapshot: Sendable { let metrics: [MetricValue]; let memoryPercent: Double }
 
 actor SystemMetricsCollector {
     let hardwareSummary: String
