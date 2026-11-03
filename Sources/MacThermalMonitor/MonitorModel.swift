@@ -3,10 +3,8 @@ import Darwin
 import Foundation
 import ServiceManagement
 import SwiftUI
-import MacThermalMonitorCore
-
 enum MetricKind: String, CaseIterable, Codable, Hashable, Identifiable, Sendable {
-    case cpuUsage, memoryUsage, thermalState, uptime, cpuTemperature, gpuTemperature, fanSpeed
+    case cpuUsage, memoryUsage, thermalState, uptime, cpuTemperature, gpuTemperature, networkDownload, networkUpload
     var id: String { rawValue }
     func title(chinese: Bool) -> String {
         switch self {
@@ -16,12 +14,13 @@ enum MetricKind: String, CaseIterable, Codable, Hashable, Identifiable, Sendable
         case .uptime: chinese ? "系统运行时间" : "System uptime"
         case .cpuTemperature: chinese ? "CPU 温度" : "CPU temperature"
         case .gpuTemperature: chinese ? "GPU 温度" : "GPU temperature"
-        case .fanSpeed: chinese ? "风扇转速" : "Fan speed"
+        case .networkDownload: chinese ? "下载速度" : "Download speed"
+        case .networkUpload: chinese ? "上传速度" : "Upload speed"
         }
     }
 }
 
-enum MainSection: String, CaseIterable, Identifiable { case overview, display, data, capabilities, about; var id: String { rawValue } }
+enum MainSection: String, CaseIterable, Identifiable { case overview, display, data, weather, capabilities, about; var id: String { rawValue } }
 enum AppTheme: String, CaseIterable, Identifiable { case system, light, dark; var id: String { rawValue }; var colorScheme: ColorScheme? { switch self { case .system: nil; case .light: .light; case .dark: .dark } } }
 enum AppLanguage: String, CaseIterable, Identifiable { case automatic, chinese, english; var id: String { rawValue } }
 
@@ -48,14 +47,21 @@ final class MonitorModel: ObservableObject {
     @Published var theme: AppTheme { didSet { save(theme.rawValue, Key.theme) } }
     @Published var language: AppLanguage { didSet { save(language.rawValue, Key.language) } }
     @Published var menuBarMetric: MetricKind { didSet { save(menuBarMetric.rawValue, Key.menuBarMetric) } }
+    @Published var weatherEnabled: Bool { didSet { save(weatherEnabled, Key.weatherEnabled) } }
+    @Published var weatherCity: String { didSet { save(weatherCity, Key.weatherCity) } }
     @Published var launchAtLogin: Bool { didSet { updateLaunchAtLogin() } }
     @Published private(set) var launchAtLoginMessage = ""
     @Published private(set) var lastUpdated: Date?
+    @Published private(set) var weather: WeatherReport?
+    @Published private(set) var weatherMessage = ""
     @Published var visibleMetricKinds: Set<MetricKind> { didSet { save(visibleMetricKinds.map(\.rawValue), Key.visibleMetricKinds) } }
 
     let floatingWindow = FloatingWindowController()
     private let collector = SystemMetricsCollector()
+    private let networkCollector = NetworkSpeedCollector()
+    private let weatherService = WeatherService()
     private var monitorTask: Task<Void, Never>?
+    private var lastWeatherRefresh: Date?
     private let defaults = UserDefaults.standard
 
     init() {
@@ -67,9 +73,13 @@ final class MonitorModel: ObservableObject {
         theme = AppTheme(rawValue: defaults.string(forKey: Key.theme) ?? "system") ?? .system
         language = AppLanguage(rawValue: defaults.string(forKey: Key.language) ?? "automatic") ?? .automatic
         menuBarMetric = MetricKind(rawValue: defaults.string(forKey: Key.menuBarMetric) ?? "cpuUsage") ?? .cpuUsage
+        weatherEnabled = defaults.object(forKey: Key.weatherEnabled) as? Bool ?? true
+        weatherCity = defaults.string(forKey: Key.weatherCity) ?? TimeZone.current.identifier.split(separator: "/").last.map(String.init) ?? "Shanghai"
         launchAtLogin = SMAppService.mainApp.status == .enabled
         let stored = defaults.stringArray(forKey: Key.visibleMetricKinds) ?? [MetricKind.cpuUsage.rawValue, MetricKind.memoryUsage.rawValue, MetricKind.thermalState.rawValue, MetricKind.uptime.rawValue]
-        visibleMetricKinds = Set(stored.compactMap(MetricKind.init(rawValue:)))
+        var visible = Set(stored.compactMap(MetricKind.init(rawValue:)))
+        visible.formUnion([.networkDownload, .networkUpload])
+        visibleMetricKinds = visible
     }
 
     var isChinese: Bool {
@@ -80,11 +90,11 @@ final class MonitorModel: ObservableObject {
         }
     }
     func text(_ zh: String, _ en: String) -> String { isChinese ? zh : en }
-    var hardwareSummary: String { FanCapability.detect().summary }
+    var hardwareSummary: String { text("本机实时采集 · 不上传系统数据", "Local real-time collection · no system data upload") }
     var menuBarTitle: String { metric(for: menuBarMetric)?.value ?? text("读取中", "Loading") }
     var visibleMetrics: [MetricValue] { metrics.filter { visibleMetricKinds.contains($0.kind) } }
     var floatingMetrics: [MetricValue] {
-        visibleMetrics.filter { [.cpuUsage, .memoryUsage, .thermalState, .uptime].contains($0.kind) }.prefix(4).map { $0 }
+        visibleMetrics.filter { [.cpuUsage, .memoryUsage, .networkDownload, .networkUpload].contains($0.kind) }.prefix(4).map { $0 }
     }
 
     func start() {
@@ -105,16 +115,38 @@ final class MonitorModel: ObservableObject {
     func showFloatingWindow() { floatingWindow.show(model: self); floatingWindow.apply(self) }
     func hideFloatingWindow() { floatingWindow.hide() }
     func configure(section: MainSection) { selectedSection = section }
+    func refreshWeatherNow() async {
+        guard weatherEnabled else { return }
+        let city = weatherCity.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !city.isEmpty else {
+            weatherMessage = text("请输入城市名称", "Enter a city name")
+            return
+        }
+        do {
+            weather = try await weatherService.currentWeather(for: city)
+            weatherMessage = ""
+            lastWeatherRefresh = .now
+        } catch {
+            weatherMessage = text("天气读取失败：\(error.localizedDescription)", "Could not fetch weather: \(error.localizedDescription)")
+        }
+    }
 
     private func refresh() async {
         let snapshot = await collector.collect(chinese: isChinese)
+        let network = await networkCollector.collect()
         guard !Task.isCancelled else { return }
-        metrics = snapshot.metrics
+        metrics = snapshot.metrics + [
+            MetricValue(kind: .networkDownload, value: network.downloadText(chinese: isChinese), source: network.interfaceName ?? text("未检测到活动网络接口", "No active network interface"), isSupported: true),
+            MetricValue(kind: .networkUpload, value: network.uploadText(chinese: isChinese), source: network.interfaceName ?? text("未检测到活动网络接口", "No active network interface"), isSupported: true)
+        ]
         lastUpdated = .now
         history.append(HistorySample(date: .now, cpuPercent: snapshot.cpuPercent, memoryPercent: snapshot.memoryPercent))
         history.removeAll { $0.date < Date.now.addingTimeInterval(-600) }
+        if weatherEnabled, lastWeatherRefresh?.addingTimeInterval(900) ?? .distantPast < .now {
+            await refreshWeatherNow()
+        }
     }
-    private func metric(for kind: MetricKind) -> MetricValue? { metrics.first { $0.kind == kind } }
+    func metric(for kind: MetricKind) -> MetricValue? { metrics.first { $0.kind == kind } }
     private func updateLaunchAtLogin() {
         do {
             if launchAtLogin { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
@@ -126,7 +158,7 @@ final class MonitorModel: ObservableObject {
     }
     private func save<T>(_ value: T, _ key: String) { defaults.set(value, forKey: key) }
     private enum Key {
-        static let refreshInterval = "refreshInterval", alwaysOnTop = "alwaysOnTop", joinAllSpaces = "joinAllSpaces", floatingOpacity = "floatingOpacity", compactFloatingWindow = "compactFloatingWindow", theme = "theme", language = "language", menuBarMetric = "menuBarMetric", visibleMetricKinds = "visibleMetricKinds"
+        static let refreshInterval = "refreshInterval", alwaysOnTop = "alwaysOnTop", joinAllSpaces = "joinAllSpaces", floatingOpacity = "floatingOpacity", compactFloatingWindow = "compactFloatingWindow", theme = "theme", language = "language", menuBarMetric = "menuBarMetric", visibleMetricKinds = "visibleMetricKinds", weatherEnabled = "weatherEnabled", weatherCity = "weatherCity"
     }
 }
 
@@ -137,7 +169,6 @@ actor SystemMetricsCollector {
     func collect(chinese: Bool) -> MetricsSnapshot {
         let cpu = cpuUsage(), memory = memoryUsage()
         let unsupported = chinese ? "不支持" : "Unsupported"
-        let noFan = chinese ? "此设备采用无风扇设计" : "Fanless design"
         let publicAPI = chinese ? "macOS 公共 API" : "macOS public API"
         let metrics = [
             MetricValue(kind: .cpuUsage, value: String(format: "%.1f%%", cpu), source: "host_statistics / \(publicAPI)", isSupported: true),
@@ -145,8 +176,7 @@ actor SystemMetricsCollector {
             MetricValue(kind: .thermalState, value: thermalText(ProcessInfo.processInfo.thermalState, chinese: chinese), source: "ProcessInfo.thermalState", isSupported: true),
             MetricValue(kind: .uptime, value: uptimeText(chinese: chinese), source: "ProcessInfo.systemUptime", isSupported: true),
             MetricValue(kind: .cpuTemperature, value: unsupported, source: chinese ? "无可靠的公开通用传感器接口" : "No reliable public sensor API", isSupported: false),
-            MetricValue(kind: .gpuTemperature, value: unsupported, source: chinese ? "无可靠的公开通用传感器接口" : "No reliable public sensor API", isSupported: false),
-            MetricValue(kind: .fanSpeed, value: FanCapability.detect().isFanless ? noFan : unsupported, source: chinese ? "未接入未验证的风扇驱动" : "No unverified fan driver is used", isSupported: false)
+            MetricValue(kind: .gpuTemperature, value: unsupported, source: chinese ? "无可靠的公开通用传感器接口" : "No reliable public sensor API", isSupported: false)
         ]
         return MetricsSnapshot(metrics: metrics, cpuPercent: cpu, memoryPercent: memory)
     }
