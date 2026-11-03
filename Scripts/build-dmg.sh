@@ -18,6 +18,12 @@ cp "$BIN" "$APP/Contents/MacOS/MacThermalMonitor"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleDisplayName</key><string>Mac Thermal Monitor</string><key>CFBundleExecutable</key><string>MacThermalMonitor</string><key>CFBundleIdentifier</key><string>com.example.MacThermalMonitor</string><key>CFBundleName</key><string>Mac Thermal Monitor</string><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>$VERSION</string><key>CFBundleVersion</key><string>$VERSION</string><key>LSMinimumSystemVersion</key><string>15.0</string><key>LSUIElement</key><true/></dict></plist>
 PLIST
+if [[ -z "${SIGNING_IDENTITY:-}" ]]; then
+  # Ad-hoc signing does not provide Apple trust or notarization, but keeps the
+  # app bundle internally consistent for personal testing.
+  codesign --force --deep --sign - "$APP"
+  codesign --verify --deep --strict --verbose=2 "$APP"
+fi
 if [[ -n "${SIGNING_IDENTITY:-}" ]]; then
   codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP"
 fi
