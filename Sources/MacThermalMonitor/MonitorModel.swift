@@ -20,13 +20,17 @@ struct HistorySample: Sendable { let date: Date; let memoryPercent: Double }
     var hardwareSummary: String { collector.hardwareSummary }
 
     func start() async { guard task == nil else { return }; await refresh(); task = Task { while !Task.isCancelled { try? await Task.sleep(for: .seconds(refreshInterval)); await refresh() } } }
-    private func refresh() async { let snapshot = await collector.collect(); visibleMetrics = snapshot.metrics; history.append(HistorySample(date: .now, memoryPercent: snapshot.memoryPercent)); history = Array(history.suffix(200)) }
-    deinit { task?.cancel() }
+    private func refresh() async {
+        let snapshot = await Task.detached(priority: .utility) { SystemMetricsCollector().collect() }.value
+        visibleMetrics = snapshot.metrics
+        history.append(HistorySample(date: .now, memoryPercent: snapshot.memoryPercent))
+        history = Array(history.suffix(200))
+    }
 }
 
 struct MetricsSnapshot: Sendable { let metrics: [MetricValue]; let memoryPercent: Double }
 
-actor SystemMetricsCollector {
+final class SystemMetricsCollector: Sendable {
     let hardwareSummary: String
     init() { hardwareSummary = FanCapability.detect().summary }
     func collect() -> MetricsSnapshot {

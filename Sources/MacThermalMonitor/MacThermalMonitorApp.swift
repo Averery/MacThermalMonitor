@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 import MacThermalMonitorCore
 
-@main
+@main @MainActor
 struct MacThermalMonitorApp: App {
     @StateObject private var model = MonitorModel()
     var body: some Scene {
@@ -19,7 +19,7 @@ struct MacThermalMonitorApp: App {
     }
 }
 
-struct MenuContent: View {
+@MainActor struct MenuContent: View {
     @ObservedObject var model: MonitorModel
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -33,7 +33,7 @@ struct MenuContent: View {
     }
 }
 
-struct DashboardView: View {
+@MainActor struct DashboardView: View {
     @ObservedObject var model: MonitorModel
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -72,7 +72,7 @@ struct HistoryChart: View {
     }
 }
 
-struct SettingsView: View {
+@MainActor struct SettingsView: View {
     @ObservedObject var model: MonitorModel
     var body: some View {
         Form {
